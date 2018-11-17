@@ -21,20 +21,28 @@ import com.phyohtet.autodao.annotation.Ignore;
 import com.phyohtet.autodao.annotation.PrimaryKey;
 import com.phyohtet.autodao.annotation.Table;
 
-public abstract class JDBCDao {
+public final class JDBCDao {
 
 	private static final Object LOCK = new Object();
 	private Connection con;
+	
+	public JDBCDao() { }
 
-	public void init(ConnectionConfiguration config) throws Exception {
+	public void init(ConnectionConfiguration config) {
 		synchronized (LOCK) {
-			Class.forName(config.getClassName());
-			con = DriverManager.getConnection(config.getUrl(), config.getUsername(), config.getPassword());
-			con.setAutoCommit(false);
+			try {
+				Class.forName(config.getClassName());
+				con = DriverManager.getConnection(config.getUrl(), config.getUsername(), config.getPassword());
+				con.setAutoCommit(false);
+			} catch (ClassNotFoundException e) {
+				throw new AutoDaoException("Driver class: " + config.getClassName() + " not found");
+			} catch (SQLException e) {
+				throw new AutoDaoException(e);
+			}
 		}
 	}
 	
-	public <T> Object insert(T t) {
+	public <T> void insert(T t) {
 		if (t == null) {
 			throw new NullPointerException();
 		}
@@ -42,14 +50,26 @@ public abstract class JDBCDao {
 		String sql = getInsertSql(t.getClass());
 		
 		try (PreparedStatement stmt = con.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
-			bindToStatement(stmt, t, predPrimaryKey);
+			
+			bindToStatement(stmt, t);
 			
 			stmt.executeUpdate();
 			
 			try (ResultSet generatedKeys = stmt.getGeneratedKeys()) {
-				return generatedKeys.next() ? generatedKeys.getObject(1) : 0;
+				for (Field f : t.getClass().getDeclaredFields()) {
+					f.setAccessible(true);
+					if (!f.isAnnotationPresent(PrimaryKey.class)) {
+						continue;
+					}
+					
+					if (!generatedKeys.next()) {
+						break;
+					} 
+					
+					f.set(t, generatedKeys.getObject(1));
+					
+				}
 			}
-			
 		} catch (Exception e) {
 			throw new AutoDaoException(e);
 		}
@@ -63,7 +83,7 @@ public abstract class JDBCDao {
 		String sql = getUpdateSql(t);
 		
 		try (PreparedStatement stmt = con.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
-			bindToStatement(stmt, t, f -> true);
+			bindToStatement(stmt, t);
 			
 			stmt.executeUpdate();
 			
@@ -75,7 +95,7 @@ public abstract class JDBCDao {
 	public <T> List<T> queryResultList(String query, Class<T> clazz, Object... args) {
 		try (PreparedStatement stmt = con.prepareStatement(query)) {
 			for (int i = 1; i <= args.length; i++) {
-				stmt.setObject(i, args[i]);
+				stmt.setObject(i, args[i - 1]);
 			}
 			
 			try (ResultSet rs = stmt.executeQuery()) {
@@ -94,7 +114,7 @@ public abstract class JDBCDao {
 	public <T> T querySingleResult(String query, Class<T> clazz, Object... args) {
 		try (PreparedStatement stmt = con.prepareStatement(query)) {
 			for (int i = 1; i <= args.length; i++) {
-				stmt.setObject(i, args[i]);
+				stmt.setObject(i, args[i - 1]);
 			}
 			
 			try (ResultSet rs = stmt.executeQuery()) {
@@ -108,7 +128,7 @@ public abstract class JDBCDao {
 	public int queryCount(String query, Object... args) {
 		try (PreparedStatement stmt = con.prepareStatement(query)) {
 			for (int i = 1; i <= args.length; i++) {
-				stmt.setObject(i, args[i]);
+				stmt.setObject(i, args[i - 1]);
 			}
 			
 			try (ResultSet rs = stmt.executeQuery()) {
@@ -121,6 +141,10 @@ public abstract class JDBCDao {
 
 	@SuppressWarnings({ "rawtypes", "unchecked" })
 	private <T> T bindToObject(ResultSet rs, Class<T> clazz) throws Exception {
+		if (clazz.isPrimitive() || Number.class.isAssignableFrom(clazz)) {
+			return (T) rs.getObject(1);
+		}
+		
 		T obj = clazz.newInstance();
 
 		for (Field f : clazz.getDeclaredFields()) {
@@ -144,13 +168,13 @@ public abstract class JDBCDao {
 	}
 	
 	@SuppressWarnings({ "rawtypes", "unchecked" })
-	private <T> void bindToStatement(PreparedStatement stmt, T t, Predicate<Field> skip) throws Exception {
+	private <T> void bindToStatement(PreparedStatement stmt, T t) throws Exception {
 		Field[] fields = t.getClass().getDeclaredFields();
-		for (int i = 0; i < fields.length; i++) {
-			Field f = fields[i];
+		int i = 1;
+		for (Field f : fields) {
 			f.setAccessible(true);
 			
-			if (skip.test(f)) {
+			if (!predPrimaryKey.test(f)) {
 				continue;
 			}
 			
@@ -162,10 +186,12 @@ public abstract class JDBCDao {
 			
 			if (converter != null) {
 				TypeConverter cv = converter.using().newInstance();
-				stmt.setObject(i + 1, cv.toDatabase(f.get(t)));
+				stmt.setObject(i, cv.toDatabase(f.get(t)));
 			} else {
-				stmt.setObject(i + 1, f.get(t));
+				stmt.setObject(i, f.get(t));
 			}
+			
+			i += 1;
 		}
 	}
 	
@@ -199,7 +225,7 @@ public abstract class JDBCDao {
 		List<Field> fields = Arrays.asList(clazz.getDeclaredFields());
 		
 		String update = fields.stream().filter(predIgnore)
-			.filter(f -> !f.isAnnotationPresent(PrimaryKey.class))
+			.filter(predPrimaryKey)
 			.map(fieldToNameFunction)
 			.collect(Collectors.joining(" = ?, "));
 		
@@ -261,7 +287,7 @@ public abstract class JDBCDao {
 		return columnName;
 	};
 	
-	private static final Predicate<Field> predIgnore = f -> f.isAnnotationPresent(Ignore.class);
+	private static final Predicate<Field> predIgnore = f -> !f.isAnnotationPresent(Ignore.class);
 	
 	private static final Predicate<Field> predPrimaryKey = f -> {
 		PrimaryKey pk = f.getAnnotation(PrimaryKey.class);

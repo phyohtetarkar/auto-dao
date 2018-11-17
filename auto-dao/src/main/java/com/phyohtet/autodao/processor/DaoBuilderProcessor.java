@@ -15,6 +15,7 @@ import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.type.DeclaredType;
+import javax.lang.model.type.PrimitiveType;
 import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
 import javax.tools.Diagnostic;
@@ -27,6 +28,7 @@ import com.phyohtet.autodao.annotation.Insert;
 import com.phyohtet.autodao.annotation.Query;
 import com.phyohtet.autodao.annotation.Transaction;
 import com.phyohtet.autodao.annotation.Update;
+import com.phyohtet.autodao.core.ConnectionConfiguration;
 import com.phyohtet.autodao.core.JDBCDao;
 import com.phyohtet.autodao.utils.ProcessorUtils;
 import com.squareup.javapoet.ClassName;
@@ -47,51 +49,52 @@ public class DaoBuilderProcessor extends AbstractProcessor {
 
 			annotatedElements.stream().forEach(element -> {
 				try {
-					TypeElement typeElement = (TypeElement) element;
-					String superClazz = typeElement.getSuperclass().toString();
-					if (JDBCDao.class.getName().equals(superClazz)) {
+					String packageName = element.getEnclosingElement().toString();
 
-						String packageName = element.getEnclosingElement().toString();
+					TypeSpec.Builder typeSpecBuilder = typeSpecBuilder(element);
+					typeSpecBuilder.addField(JDBCDao.class, "db", Modifier.PRIVATE);
 
-						TypeSpec.Builder typeSpecBuilder = typeSpecBuilder(element);
+					typeSpecBuilder.addMethod(MethodSpec.constructorBuilder().addModifiers(Modifier.PUBLIC)
+							.addParameter(ConnectionConfiguration.class, "cc")
+							.addStatement("this.db = new $T()", JDBCDao.class).addStatement("this.db.init(cc)")
+							.build());
 
-						for (Element e : element.getEnclosedElements()) {
-							if (!(e instanceof ExecutableElement)) {
-								continue;
-							}
-
-							if (!e.getModifiers().contains(Modifier.ABSTRACT)) {
-								continue;
-							}
-
-							MethodSpec.Builder meBuilder = methodSpecBuilder(e);
-
-							ExecutableElement executableElement = (ExecutableElement) e;
-
-							if (ProcessorUtils.hasReturnType(e)) {
-								if (ProcessorUtils.hasAnnotation(executableElement.getReturnType(), Dao.class)) {
-									DeclaredType declaredType = (DeclaredType) executableElement.getReturnType();
-									generateDao(declaredType.asElement());
-
-									FieldSpec fieldSpec = basicFieldSpec(declaredType.asElement());
-									typeSpecBuilder.addField(fieldSpec);
-
-									meBuilder.beginControlFlow("if (" + fieldSpec.name + " == null)")
-											.addStatement("return new $T(this)",
-													getClassName(declaredType.toString().concat("Impl")))
-											.endControlFlow();
-
-									meBuilder.addStatement("return " + fieldSpec.name);
-								} else {
-									meBuilder.addStatement("return null");
-								}
-							}
-
-							typeSpecBuilder.addMethod(meBuilder.build());
+					for (Element e : element.getEnclosedElements()) {
+						if (!(e instanceof ExecutableElement)) {
+							continue;
 						}
 
-						writeJavaFile(packageName, typeSpecBuilder.build());
+						if (!e.getModifiers().contains(Modifier.ABSTRACT)) {
+							continue;
+						}
+
+						MethodSpec.Builder meBuilder = methodSpecBuilder(e);
+
+						ExecutableElement executableElement = (ExecutableElement) e;
+
+						if (ProcessorUtils.hasReturnType(e)) {
+							if (ProcessorUtils.hasAnnotation(executableElement.getReturnType(), Dao.class)) {
+								DeclaredType declaredType = (DeclaredType) executableElement.getReturnType();
+								generateDao(declaredType.asElement());
+
+								FieldSpec fieldSpec = basicFieldSpec(declaredType.asElement());
+								typeSpecBuilder.addField(fieldSpec);
+
+								meBuilder.beginControlFlow("if (" + fieldSpec.name + " == null)")
+										.addStatement("return new $T(db)",
+												getClassName(declaredType.toString().concat("Impl")))
+										.endControlFlow();
+
+								meBuilder.addStatement("return " + fieldSpec.name);
+							} else {
+								meBuilder.addStatement("return null");
+							}
+						}
+
+						typeSpecBuilder.addMethod(meBuilder.build());
 					}
+
+					writeJavaFile(packageName, typeSpecBuilder.build());
 				} catch (Exception e) {
 					processingEnv.getMessager().printMessage(Diagnostic.Kind.ERROR, e.getMessage(), element);
 				}
@@ -130,18 +133,20 @@ public class DaoBuilderProcessor extends AbstractProcessor {
 					String returnn = ProcessorUtils.hasReturnType(ee) ? "return " : "";
 					
 					if (query != null) {
-						if (ee.getReturnType().getKind().isPrimitive()) {
-							throw new AutoDaoException("Query return type must not be primitive.");
-						}
-						DeclaredType declaredType = (DeclaredType) ee.getReturnType();
 						meBuilder.addStatement("String sql = $S", query.sql());
-
-						if (declaredType.asElement().toString().equals("java.util.List")) {
-							meBuilder.addStatement(returnn + "db.queryResultList(sql, $T.class" + params + ")",
-									getClassName(declaredType.getTypeArguments().get(0).toString()));
+						if (ee.getReturnType().getKind().isPrimitive()) {
+							PrimitiveType primitiveType = (PrimitiveType) ee.getReturnType();
+							meBuilder.addStatement(returnn + "db.querySingleResult(sql, $N.class" + params + ")",
+									primitiveType.toString());
 						} else {
-							meBuilder.addStatement(returnn + "db.querySingleResult(sql, $T.class" + params + ")",
-									getClassName(declaredType.toString()));
+							DeclaredType declaredType = (DeclaredType) ee.getReturnType();
+							if (declaredType.asElement().toString().equals("java.util.List")) {
+								meBuilder.addStatement(returnn + "db.queryResultList(sql, $T.class" + params + ")",
+										getClassName(declaredType.getTypeArguments().get(0).toString()));
+							} else {
+								meBuilder.addStatement(returnn + "db.querySingleResult(sql, $T.class" + params + ")",
+										getClassName(declaredType.toString()));
+							}
 						}
 					} else if (count != null) {
 						if (ee.getReturnType().getKind() != TypeKind.INT) {
@@ -154,9 +159,10 @@ public class DaoBuilderProcessor extends AbstractProcessor {
 						meBuilder.addCode("try {\n");
 						meBuilder.addStatement("\tdb.$N($N)", insert != null ? "insert" : "update", 
 								ee.getParameters().get(0).getSimpleName().toString());
-						meBuilder.addStatement("\tdb.commitTransaction()");
 						meBuilder.addCode("} catch ($T e) {\n"
-								+ "\t db.rollbackTransaction();\n"
+								+ "\tdb.rollbackTransaction();\n"
+								+ "} finally {\n"
+								+ "\tdb.commitTransaction();\n"
 								+ "}\n", AutoDaoException.class);
 					} else if (trans != null) {
 					

@@ -5,25 +5,24 @@ import com.phyohtet.autodao.annotation.ConnectionConfig;
 
 public class AutoDao {
 	
-	public static Builder builder(Class<? extends JDBCDao> clazz) {
-		return new Builder(clazz);
+	public static <T> Builder<T> builder(Class<T> clazz) {
+		return new Builder<T>(clazz);
 	}
 	
-	public static class Builder {
+	public static class Builder<T> {
 		
-		private Class<? extends JDBCDao> clazz;
+		private Class<T> clazz;
 		
-		private Builder(Class<? extends JDBCDao> clazz) {
+		private Builder(Class<T> clazz) {
 			this.clazz = clazz;
 		}
 		
-		public JDBCDao build() {
+		@SuppressWarnings("unchecked")
+		public T build() {
 			try {
 				ConnectionConfig config = clazz.getAnnotation(ConnectionConfig.class);
 				
-				Class<?> impl =  Class.forName(clazz.getName().concat("Impl"));
-				
-				JDBCDao autoDao = (JDBCDao) impl.newInstance();
+				Class<T> impl =  (Class<T>) Class.forName(clazz.getName().concat("Impl"));
 				
 				if (config == null) {
 					throw new AutoDaoException("Connection config not found.");
@@ -32,12 +31,10 @@ public class AutoDao {
 				ConnectionConfiguration cc = new ConnectionConfiguration();
 				cc.setClassName(config.driverClassName());
 				cc.setUrl(config.url());
-				cc.setUsername(cc.getUsername());
-				cc.setPassword(config.password());
+				cc.setUsername(config.username().isEmpty() ? null : config.username());
+				cc.setPassword(config.password().isEmpty() ? null : config.password());
 				
-				autoDao.init(cc);
-				
-				return autoDao;
+				return impl.getDeclaredConstructor(ConnectionConfiguration.class).newInstance(cc);
 			} catch (Exception e) {
 				throw new AutoDaoException(e);
 			}

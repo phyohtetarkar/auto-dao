@@ -8,8 +8,6 @@ import java.lang.annotation.Target;
 
 @Retention(RUNTIME)
 @Target(FIELD)
-public @interface PrimaryKey {
- 
-	boolean autoGenerate() default false;
-	
+public @interface Embeddable {
+
 }

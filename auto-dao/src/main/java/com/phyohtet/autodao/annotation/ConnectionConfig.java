@@ -11,6 +11,6 @@ import java.lang.annotation.Target;
 public @interface ConnectionConfig {
 	String driverClassName();
 	String url();
-	String username();
-	String password();
+	String username() default "";
+	String password() default "";
 }
