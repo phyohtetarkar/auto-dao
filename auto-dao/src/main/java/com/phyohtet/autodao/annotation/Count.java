@@ -8,7 +8,7 @@ import java.lang.annotation.Target;
 
 @Retention(SOURCE)
 @Target(METHOD)
-public @interface Query {
+public @interface Count {
 
 	String sql();
 	

@@ -1,5 +1,8 @@
 package com.phyohtet.model;
 
+import com.phyohtet.autodao.annotation.Entity;
+
+@Entity
 public class Category {
 
 	private int id;

@@ -1,9 +1,9 @@
 package com.phyohtet.autodao.core;
 
-public interface TypeConverter<E, DBType> {
+public interface TypeConverter<E, DB> {
 
-	E fromDatabase(DBType type);
+	E fromDatabase(DB db);
 	
-	DBType toDatabase(E type);
+	DB toDatabase(E e);
 	
 }
